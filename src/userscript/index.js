@@ -21,8 +21,7 @@ const loadImage = (src) => new Promise((resolve, reject) => {
 const canvasToBlob = (canvas, type = 'image/png') =>
   new Promise(resolve => canvas.toBlob(resolve, type));
 
-const isValidGeminiImage = (img) =>
-  /=s\d+\-rj/.test(img.src) || (img.naturalWidth >= 256 && img.naturalHeight >= 256);
+const isValidGeminiImage = (img) => img.closest('model-response,.generated-image-container') !== null;
 
 const findGeminiImages = () =>
   [...document.querySelectorAll('img[src*="googleusercontent.com"]')].filter(isValidGeminiImage);
@@ -49,23 +48,17 @@ async function processImage(imgElement) {
   processingQueue.add(imgElement);
   imgElement.dataset.watermarkProcessed = 'processing';
 
+  const originalSrc = imgElement.src;
   try {
-    if (!isValidGeminiImage(imgElement)) {
-      imgElement.dataset.watermarkProcessed = 'skipped';
-      return;
-    }
-
-    const originalSrc = imgElement.src;
     imgElement.src = '';
-    imgElement.dataset.src = originalSrc;
+    const normalSizeBlob = await fetchBlob(replaceWithNormalSize(originalSrc));
+    const normalSizeBlobUrl = URL.createObjectURL(normalSizeBlob);
+    const normalSizeImg = await loadImage(normalSizeBlobUrl);
+    const processedCanvas = await engine.removeWatermarkFromImage(normalSizeImg);
+    const processedBlob = await canvasToBlob(processedCanvas);
 
-    const blob = await fetchBlob(replaceWithNormalSize(originalSrc));
-    const blobUrl = URL.createObjectURL(blob);
-    const img = await loadImage(blobUrl);
-    const canvas = await engine.removeWatermarkFromImage(img);
-    const processedBlob = await canvasToBlob(canvas);
+    URL.revokeObjectURL(normalSizeBlobUrl);
 
-    URL.revokeObjectURL(blobUrl);
     imgElement.src = URL.createObjectURL(processedBlob);
     imgElement.dataset.watermarkProcessed = 'true';
 
@@ -73,6 +66,7 @@ async function processImage(imgElement) {
   } catch (error) {
     console.warn('[Gemini Watermark Remover] Failed to process image:', error);
     imgElement.dataset.watermarkProcessed = 'failed';
+    imgElement.src = originalSrc;
   } finally {
     processingQueue.delete(imgElement);
   }
@@ -80,6 +74,8 @@ async function processImage(imgElement) {
 
 const processAllImages = () => {
   const images = findGeminiImages();
+  if (images.length === 0) return;
+
   console.log(`[Gemini Watermark Remover] Found ${images.length} images to process`);
   images.forEach(processImage);
 };
@@ -98,7 +94,8 @@ async function processImageBlob(blob) {
   return canvasToBlob(canvas);
 }
 
-const GEMINI_URL_PATTERN = /^https:\/\/lh3\.googleusercontent\.com\/rd-gg(-dl)?\//; // downloadable image url pattern
+// Only match gemini generated assets(copy & download), ignore user-upload previews.
+const GEMINI_URL_PATTERN = /^https:\/\/lh3\.googleusercontent\.com\/rd-gg(?:-dl)?\/.+=s(?!0-d\?).*/;
 
 // Intercept fetch requests to replace downloadable image with the watermark removed image
 const { fetch: origFetch } = unsafeWindow;
